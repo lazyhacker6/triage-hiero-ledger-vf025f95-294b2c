@@ -15,7 +15,7 @@ permissions:
 jobs:
   run-bot:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: hiero-client-sdk-linux-large
+    runs-on: ubuntu-latest
 
     steps:
       - name: Harden Runner

@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   on-pr-review:
-    runs-on: hiero-client-sdk-linux-large
+    runs-on: ubuntu-latest
     if: github.event.pull_request.draft == false
 
     concurrency:
