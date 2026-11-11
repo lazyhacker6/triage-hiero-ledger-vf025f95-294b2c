@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "TransactionResponse.h"
+#include "Client.h"
+#include "TransactionReceipt.h"
+#include "TransactionReceiptQuery.h"
+#include "TransactionRecord.h"
+#include "TransactionRecordQuery.h"
+#include "impl/HexConverter.h"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <unordered_set>
+
+namespace Hiero
+{
+//-----
+TransactionResponse::TransactionResponse(AccountId nodeId,
+                                         TransactionId transactionId,
+                                         std::vector<std::byte> hash,
+                                         std::vector<AccountId> transactionNodeAccountIds)
+  : mNodeId(std::move(nodeId))
+  , mTransactionHash(std::move(hash))
+  , mTransactionId(std::move(transactionId))
+  , mTransactionNodeAccountIds(std::move(transactionNodeAccountIds))
+{
+}
+
+//-----
+TransactionReceipt TransactionResponse::getReceipt(const Client& client) const
+{
+  return getReceipt(client, client.getRequestTimeout());
+}
+
+//-----
+TransactionReceipt TransactionResponse::getReceipt(const Client& client,
+                                                   const std::chrono::system_clock::duration& timeout) const
+{
+  TransactionReceipt txReceipt = getReceiptQuery(&client).execute(client, timeout);
+
+  if (mValidateStatus)
+  {
+    txReceipt.validateStatus();
+  }
+
+  return txReceipt;
+}
+
+//-----
+TransactionReceiptQuery TransactionResponse::getReceiptQuery(const Client* client) const
+{
+  auto query = TransactionReceiptQuery().setTransactionId(mTransactionId);
+
+  if (client && client->getAllowReceiptNodeFailover())
+  {
+    query.setNodeAccountIds(buildFailoverNodeList(*client));
+  }
+  else
+  {
+    query.setNodeAccountIds({ mNodeId });
+  }
+
+  return query;
+}
+
+//-----
+std::future<TransactionReceipt> TransactionResponse::getReceiptAsync(const Client& client) const
+{
+  return getReceiptAsync(client, client.getRequestTimeout());
+}
+
+//-----
+std::future<TransactionReceipt> TransactionResponse::getReceiptAsync(
+  const Client& client,
+  const std::chrono::system_clock::duration& timeout) const
+{
+  return std::async(std::launch::async, [this, &client, &timeout]() { return this->getReceipt(client, timeout); });
+}
+
+//-----
+void TransactionResponse::getReceiptAsync(
+  const Client& client,
+  const std::function<void(const TransactionReceipt&, const std::exception&)>& callback) const
+{
+  return getReceiptAsync(client, client.getRequestTimeout(), callback);
+}
+
+//-----
+void TransactionResponse::getReceiptAsync(
+  const Client& client,
+  const std::chrono::system_clock::duration& timeout,
+  const std::function<void(const TransactionReceipt&, const std::exception&)>& callback) const
+{
+  std::future<TransactionReceipt> future =
+    std::async(std::launch::async, [this, &client, &timeout]() { return this->getReceipt(client, timeout); });
+
+  try
+  {
+    callback(future.get(), std::exception());
+  }
+  catch (const std::exception& exception)
+  {
+    callback(TransactionReceipt(), exception);
+  }
+}
+
+//-----
+void TransactionResponse::getReceiptAsync(const Client& client,
+                                          const std::function<void(const TransactionReceipt&)>& responseCallback,
+                                          const std::function<void(const std::exception&)>& exceptionCallback) const
+{
+  return getReceiptAsync(client, client.getRequestTimeout(), responseCallback, exceptionCallback);
+}
+
+//-----
+void TransactionResponse::getReceiptAsync(const Client& client,
+                                          const std::chrono::system_clock::duration& timeout,
+                                          const std::function<void(const TransactionReceipt&)>& responseCallback,
+                                          const std::function<void(const std::exception&)>& exceptionCallback) const
+{
+  std::future<TransactionReceipt> future =
+    std::async(std::launch::async, [this, &client, &timeout]() { return this->getReceipt(client, timeout); });
+
+  try
+  {
+    responseCallback(future.get());
+  }
+  catch (const std::exception& exception)
+  {
+    exceptionCallback(exception);
+  }
+}
+
+//-----
+TransactionRecord TransactionResponse::getRecord(const Client& client) const
+{
+  return getRecord(client, client.getRequestTimeout());
+}
+
+//-----
+TransactionRecord TransactionResponse::getRecord(const Client& client,
+                                                 const std::chrono::system_clock::duration& timeout) const
+{
+  return getRecordQuery(&client).execute(client, timeout);
+}
+
+//-----
+TransactionRecordQuery TransactionResponse::getRecordQuery(const Client* client) const
+{
+  auto query = TransactionRecordQuery().setTransactionId(mTransactionId);
+
+  if (client && client->getAllowReceiptNodeFailover())
+  {
+    query.setNodeAccountIds(buildFailoverNodeList(*client));
+  }
+  else
+  {
+    query.setNodeAccountIds({ mNodeId });
+  }
+
+  return query;
+}
+
+//-----
+std::vector<AccountId> TransactionResponse::buildFailoverNodeList(const Client& client) const
+{
+  std::vector<AccountId> candidates;
+  if (!mTransactionNodeAccountIds.empty())
+  {
+    candidates = mTransactionNodeAccountIds;
+  }
+  else
+  {
+    std::unordered_set<std::string> seen;
+    for (const auto& [url, accountId] : client.getNetwork())
+    {
+      const std::string key = accountId.toString();
+      if (seen.find(key) == seen.end())
+      {
+        seen.insert(key);
+        candidates.push_back(accountId);
+      }
+    }
+  }
+
+  std::unordered_set<std::string> seen;
+  std::vector<AccountId> nodeIds;
+  nodeIds.push_back(mNodeId);
+  seen.insert(mNodeId.toString());
+
+  std::vector<AccountId> others;
+  for (const auto& node : candidates)
+  {
+    const std::string key = node.toString();
+    if (seen.find(key) == seen.end())
+    {
+      seen.insert(key);
+      others.push_back(node);
+    }
+  }
+
+  std::sort(others.begin(),
+            others.end(),
+            [](const AccountId& a, const AccountId& b)
+            {
+              if (a.mShardNum != b.mShardNum)
+                return a.mShardNum < b.mShardNum;
+              if (a.mRealmNum != b.mRealmNum)
+                return a.mRealmNum < b.mRealmNum;
+              return a.mAccountNum.value_or(0ULL) < b.mAccountNum.value_or(0ULL);
+            });
+
+  nodeIds.insert(nodeIds.end(), others.begin(), others.end());
+  return nodeIds;
+}
+
+//-----
+std::future<TransactionRecord> TransactionResponse::getRecordAsync(const Client& client) const
+{
+  return getRecordAsync(client, client.getRequestTimeout());
+}
+
+//-----
+std::future<TransactionRecord> TransactionResponse::getRecordAsync(
+  const Client& client,
+  const std::chrono::system_clock::duration& timeout) const
+{
+  return std::async(std::launch::async, [this, &client, &timeout]() { return this->getRecord(client, timeout); });
+}
+
+//-----
+void TransactionResponse::getRecordAsync(
+  const Client& client,
+  const std::function<void(const TransactionRecord&, const std::exception&)>& callback) const
+{
+  return getRecordAsync(client, client.getRequestTimeout(), callback);
+}
+
+//-----
+void TransactionResponse::getRecordAsync(
+  const Client& client,
+  const std::chrono::system_clock::duration& timeout,
+  const std::function<void(const TransactionRecord&, const std::exception&)>& callback) const
+{
+  std::future<TransactionRecord> future =
+    std::async(std::launch::async, [this, &client, &timeout]() { return this->getRecord(client, timeout); });
+
+  try
+  {
+    callback(future.get(), std::exception());
+  }
+  catch (const std::exception& exception)
+  {
+    callback(TransactionRecord(), exception);
+  }
+}
+
+//-----
+void TransactionResponse::getRecordAsync(const Client& client,
+                                         const std::function<void(const TransactionRecord&)>& responseCallback,
+                                         const std::function<void(const std::exception&)>& exceptionCallback) const
+{
+  return getRecordAsync(client, client.getRequestTimeout(), responseCallback, exceptionCallback);
+}
+
+//-----
+void TransactionResponse::getRecordAsync(const Client& client,
+                                         const std::chrono::system_clock::duration& timeout,
+                                         const std::function<void(const TransactionRecord&)>& responseCallback,
+                                         const std::function<void(const std::exception&)>& exceptionCallback) const
+{
+  std::future<TransactionRecord> future =
+    std::async(std::launch::async, [this, &client, &timeout]() { return this->getRecord(client, timeout); });
+
+  try
+  {
+    responseCallback(future.get());
+  }
+  catch (const std::exception& exception)
+  {
+    exceptionCallback(exception);
+  }
+}
+
+//-----
+std::string TransactionResponse::toString() const
+{
+  nlohmann::json json;
+  json["mNodeId"] = mNodeId.toString();
+  json["mTransactionHash"] = internal::HexConverter::bytesToHex(mTransactionHash);
+  json["mTransactionId"] = mTransactionId.toString();
+  return json.dump();
+}
+
+//-----
+std::ostream& operator<<(std::ostream& os, const TransactionResponse& response)
+{
+  os << response.toString();
+  return os;
+}
+
+//-----
+TransactionResponse& TransactionResponse::setValidateStatus(bool validate)
+{
+  mValidateStatus = validate;
+  return *this;
+}
+
+} // namespace Hiero

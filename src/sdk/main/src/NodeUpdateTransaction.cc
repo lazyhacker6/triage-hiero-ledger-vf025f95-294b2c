@@ -1,0 +1,298 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "NodeUpdateTransaction.h"
+#include "TransactionId.h"
+#include "exceptions/IllegalStateException.h"
+#include "impl/Node.h"
+#include "impl/Utilities.h"
+
+#include <services/node_update.pb.h>
+#include <services/transaction.pb.h>
+
+#include <stdexcept>
+
+namespace Hiero
+{
+//-----
+NodeUpdateTransaction::NodeUpdateTransaction(const proto::TransactionBody& transactionBody)
+  : Transaction<NodeUpdateTransaction>(transactionBody)
+{
+  initFromSourceTransactionBody();
+}
+
+//-----
+NodeUpdateTransaction::NodeUpdateTransaction(
+  const std::map<TransactionId, std::map<AccountId, proto::Transaction>>& transactions)
+  : Transaction<NodeUpdateTransaction>(transactions)
+{
+  initFromSourceTransactionBody();
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setNodeId(uint64_t nodeId)
+{
+  requireNotFrozen();
+  mNodeId = nodeId;
+  mNodeIdSet = true;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setAccountId(const AccountId& accountId)
+{
+  requireNotFrozen();
+  mAccountId = accountId;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setDescription(std::string_view description)
+{
+  requireNotFrozen();
+  mDescription = description.data();
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setGossipEndpoints(const std::vector<Endpoint>& endpoints)
+{
+  requireNotFrozen();
+  mGossipEndpoints = endpoints;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setServiceEndpoints(const std::vector<Endpoint>& endpoints)
+{
+  requireNotFrozen();
+  mServiceEndpoints = endpoints;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setGossipCaCertificate(const std::vector<std::byte>& certificate)
+{
+  requireNotFrozen();
+  mGossipCaCertificate = certificate;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setGrpcCertificateHash(const std::vector<std::byte>& hash)
+{
+  requireNotFrozen();
+  mGrpcCertificateHash = hash;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setAdminKey(const std::shared_ptr<Key>& key)
+{
+  requireNotFrozen();
+  mAdminKey = key;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setDeclineReward(bool decline)
+{
+  requireNotFrozen();
+  mDeclineReward = decline;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::setGrpcWebProxyEndpoint(const Endpoint& endpoint)
+{
+  requireNotFrozen();
+  mGrpcWebProxyEndpoint = endpoint;
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::deleteGrpcWebProxyEndpoint()
+{
+  requireNotFrozen();
+  mGrpcWebProxyEndpoint.reset();
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::addAssociatedRegisteredNode(uint64_t registeredNodeId)
+{
+  requireNotFrozen();
+  if (!mAssociatedRegisteredNodes.has_value())
+  {
+    mAssociatedRegisteredNodes = std::vector<uint64_t>{};
+  }
+  mAssociatedRegisteredNodes->push_back(registeredNodeId);
+  return *this;
+}
+
+//-----
+NodeUpdateTransaction& NodeUpdateTransaction::clearAssociatedRegisteredNodes()
+{
+  requireNotFrozen();
+  mAssociatedRegisteredNodes = std::vector<uint64_t>{};
+  return *this;
+}
+
+//-----
+grpc::Status NodeUpdateTransaction::submitRequest(const proto::Transaction& request,
+                                                  const std::shared_ptr<internal::Node>& node,
+                                                  const std::chrono::system_clock::time_point& deadline,
+                                                  proto::TransactionResponse* response) const
+{
+  return node->submitTransaction(proto::TransactionBody::DataCase::kNodeUpdate, request, deadline, response);
+}
+
+//-----
+void NodeUpdateTransaction::validateChecksums(const Client& client) const
+{
+  if (!(mAccountId == AccountId()))
+  {
+    mAccountId.validateChecksum(client);
+  }
+}
+
+//-----
+void NodeUpdateTransaction::addToBody(proto::TransactionBody& body) const
+{
+  body.set_allocated_nodeupdate(build());
+}
+
+//-----
+void NodeUpdateTransaction::initFromSourceTransactionBody()
+{
+  const proto::TransactionBody transactionBody = getSourceTransactionBody();
+
+  if (!transactionBody.has_nodeupdate())
+  {
+    throw std::invalid_argument("Transaction body doesn't contain NodeUpdate data");
+  }
+
+  const aproto::NodeUpdateTransactionBody& body = transactionBody.nodeupdate();
+
+  mNodeId = body.node_id();
+  mNodeIdSet = true;
+  mAccountId = AccountId::fromProtobuf(body.account_id());
+
+  if (body.has_description())
+  {
+    mDescription = body.description().value();
+  }
+
+  for (int i = 0; i < body.gossip_endpoint_size(); i++)
+  {
+    mGossipEndpoints.push_back(Endpoint::fromProtobuf(body.gossip_endpoint(i)));
+  }
+
+  for (int i = 0; i < body.service_endpoint_size(); i++)
+  {
+    mServiceEndpoints.push_back(Endpoint::fromProtobuf(body.service_endpoint(i)));
+  }
+
+  mGossipCaCertificate = internal::Utilities::stringToByteVector(body.gossip_ca_certificate().value());
+
+  if (body.has_grpc_certificate_hash())
+  {
+    mGrpcCertificateHash = internal::Utilities::stringToByteVector(body.grpc_certificate_hash().value());
+  }
+
+  if (body.has_admin_key())
+  {
+    mAdminKey = Key::fromProtobuf(body.admin_key());
+  }
+
+  if (body.has_decline_reward())
+  {
+    mDeclineReward = body.decline_reward().value();
+  }
+
+  if (body.has_grpc_proxy_endpoint())
+  {
+    mGrpcWebProxyEndpoint = Endpoint::fromProtobuf(body.grpc_proxy_endpoint());
+  }
+
+  if (body.has_associated_registered_node_list())
+  {
+    std::vector<uint64_t> ids;
+    for (int i = 0; i < body.associated_registered_node_list().associated_registered_node_size(); ++i)
+    {
+      ids.push_back(body.associated_registered_node_list().associated_registered_node(i));
+    }
+    mAssociatedRegisteredNodes = std::move(ids);
+  }
+}
+
+//-----
+aproto::NodeUpdateTransactionBody* NodeUpdateTransaction::build() const
+{
+  // Validate that nodeId has been explicitly set
+  if (!mNodeIdSet)
+  {
+    throw IllegalStateException("NodeUpdateTransaction requires nodeId to be explicitly set before execution");
+  }
+
+  auto body = std::make_unique<aproto::NodeUpdateTransactionBody>();
+
+  body->set_node_id(mNodeId);
+  if (!(mAccountId == AccountId()))
+  {
+    body->set_allocated_account_id(mAccountId.toProtobuf().release());
+  }
+
+  if (mDescription.has_value())
+  {
+    auto value = std::make_unique<google::protobuf::StringValue>();
+    value->set_value(mDescription.value());
+    body->set_allocated_description(value.release());
+  }
+
+  for (const Endpoint& e : mGossipEndpoints)
+  {
+    body->mutable_gossip_endpoint()->AddAllocated(e.toProtobuf().release());
+  }
+
+  for (const Endpoint& e : mServiceEndpoints)
+  {
+    body->mutable_service_endpoint()->AddAllocated(e.toProtobuf().release());
+  }
+
+  if (!mGossipCaCertificate.empty())
+  {
+    body->mutable_gossip_ca_certificate()->set_value(internal::Utilities::byteVectorToString(mGossipCaCertificate));
+  }
+
+  if (mGrpcCertificateHash.has_value())
+  {
+    body->mutable_grpc_certificate_hash()->set_value(
+      internal::Utilities::byteVectorToString(mGrpcCertificateHash.value()));
+  }
+
+  if (mAdminKey != nullptr)
+  {
+    body->set_allocated_admin_key(mAdminKey->toProtobufKey().release());
+  }
+
+  auto boolValue = std::make_unique<google::protobuf::BoolValue>();
+  boolValue->set_value(mDeclineReward);
+  body->set_allocated_decline_reward(boolValue.release());
+
+  if (mGrpcWebProxyEndpoint.has_value())
+  {
+    body->set_allocated_grpc_proxy_endpoint(mGrpcWebProxyEndpoint->toProtobuf().release());
+  }
+
+  if (mAssociatedRegisteredNodes.has_value())
+  {
+    auto* list = body->mutable_associated_registered_node_list();
+    for (uint64_t id : mAssociatedRegisteredNodes.value())
+    {
+      list->add_associated_registered_node(id);
+    }
+  }
+
+  return body.release();
+}
+
+} // namespace Hiero

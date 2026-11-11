@@ -1,0 +1,338 @@
+name: "ZXC: Build Library"
+on:
+  workflow_call:
+    inputs:
+      run-windows-builds:
+        description: "Select this option when you want to run the Windows builds."
+        type: boolean
+        required: false
+        default: false
+
+      run-macos-builds:
+        description: "Select this option when you want to run the MacOS builds."
+        type: boolean
+        required: false
+        default: false 
+       
+      upload-artifacts:
+        description: "Select this option when you want to upload the artifacts."
+        type: boolean
+        required: false
+        default: true
+
+  workflow_dispatch:
+    inputs:
+      run-windows-builds:
+        description: "Select this option when you want to run the Windows builds."
+        type: boolean
+        required: false
+        default: false
+
+      run-macos-builds:
+        description: "Select this option when you want to run the MacOS builds."
+        type: boolean
+        required: false
+        default: false 
+         
+      upload-artifacts:
+        description: "Select this option when you want to upload the artifacts."
+        type: boolean 
+        required: false
+        default: true
+
+defaults:
+  run:
+    shell: bash
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: hiero-client-sdk-linux-large
+    strategy:
+      matrix:
+        include:
+          - type: sdk
+            check-path: "src/sdk/main"
+          - type: sdk-tests
+            check-path: "src/sdk/tests"
+          - type: tck
+            check-path: "src/tck"
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99 # v2.19.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run Clang-Format
+        uses: jidicula/clang-format-action@654a770daa28443dd111d133e4083e21c1075674 # v4.18.0
+        with:
+          clang-format-version: "17"
+          check-path: ${{ matrix.check-path }}
+
+  build:
+    name: Build
+    runs-on: hiero-client-sdk-linux-large
+
+    env:
+      HIERO_NETWORK: localhost
+    strategy:
+      matrix:
+        include:
+          - os: Linux
+            preset: linux-x64
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99 # v2.19.2
+        with:
+          egress-policy: audit
+
+      - name: Setup Control Groups
+        id: cgroup
+        run: |
+          echo "::group::Get System Configuration"
+            USR_ID="$(id -un)"
+            GRP_ID="$(id -gn)"
+            SDK_CPP_MEM_LIMIT="30064771072"
+            AGENT_MEM_LIMIT="2147483648"
+            USER_SLICE="user.slice/user-$(id -u).slice"
+            USER_SERVICE="${USER_SLICE}/user@$(id -u).service"
+            SDK_CPP_GROUP_NAME="${USER_SERVICE}/sdk-cpp-${{ github.run_id }}"
+            AGENT_GROUP_NAME="${USER_SERVICE}/agent-${{ github.run_id }}"
+          echo "::endgroup::"
+          echo "::group::Install Control Group Tools"
+            if ! command -v cgcreate >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y cgroup-tools
+            fi
+          echo "::endgroup::"
+          echo "::group::Create Control Groups"
+            sudo cgcreate -g cpu,memory:${USER_SLICE} -a ${USR_ID}:${GRP_ID} -t ${USR_ID}:${GRP_ID}
+            sudo cgcreate -g cpu,memory:${USER_SERVICE} -a ${USR_ID}:${GRP_ID} -t ${USR_ID}:${GRP_ID}
+            sudo cgcreate -g cpu,memory:${SDK_CPP_GROUP_NAME} -a ${USR_ID}:${GRP_ID} -t ${USR_ID}:${GRP_ID}
+            sudo cgcreate -g cpu,memory:${AGENT_GROUP_NAME} -a ${USR_ID}:${GRP_ID} -t ${USR_ID}:${GRP_ID}
+          echo "::endgroup::"
+          echo "::group::Set Control Group Limits"
+            cgset -r cpu.weight=768 ${SDK_CPP_GROUP_NAME}
+            cgset -r cpu.weight=500 ${AGENT_GROUP_NAME}
+            cgset -r memory.max=${SDK_CPP_MEM_LIMIT} ${SDK_CPP_GROUP_NAME}
+            cgset -r memory.max=${AGENT_MEM_LIMIT} ${AGENT_GROUP_NAME}
+            cgset -r memory.swap.max=${SDK_CPP_MEM_LIMIT} ${SDK_CPP_GROUP_NAME}
+            cgset -r memory.swap.max=${AGENT_MEM_LIMIT} ${AGENT_GROUP_NAME}
+          echo "::endgroup::"
+          echo "::group::Move Runner Processes to Control Groups"
+            sudo cgclassify --sticky -g cpu,memory:${AGENT_GROUP_NAME} $(pgrep 'Runner.Listener' | tr '\n' ' ')
+            sudo cgclassify -g cpu,memory:${AGENT_GROUP_NAME} $(pgrep 'Runner.Worker' | tr '\n' ' ')
+          echo "::endgroup::"
+
+          CG_EXEC="cgexec -g cpu,memory:${SDK_CPP_GROUP_NAME} --sticky ionice -c 2 -n 2 nice -n 19"
+          echo "exec=${CG_EXEC}" >> "${GITHUB_OUTPUT}"
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: true
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+
+      - name: Install Linux Prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libc6-dbg libgtest-dev build-essential
+
+      - name: Ensure Binary Cache Path Exists
+        run: mkdir -p "${{ github.workspace }}/b/vcpkg_cache"
+
+      - name: Install CMake & Ninja
+        uses: step-security/get-cmake@16c2bcb98b44e2c3a92d9474f8fd6f038d42de03 # v4.3.2
+        with:
+          useCloudCache: true
+
+      - name: Setup VCPkg
+        uses: step-security/run-vcpkg@48490398616947b0df92dc1b24aab5339a66f9f0 # v11.5.2
+        with:
+          binaryCachePath: ${{ github.workspace }}/b/vcpkg_cache
+
+      - name: Convert VCPkg to Full Clone
+        working-directory: vcpkg
+        run: git fetch --unshallow --prune
+
+      - name: CMake Build (Debug)
+        env:
+          VCPKG_BINARY_SOURCES: clear
+        run: |
+          echo "::group::Configure Project"
+          ${{ steps.cgroup.outputs.exec }} cmake --preset ${{ matrix.preset }}-debug \
+            -DBUILD_TESTS=ON -DBUILD_TCK=ON -DBUILD_TCK_TESTS=ON -DBUILD_EXAMPLES=ON
+          echo "::endgroup::"
+
+          echo "::group::Build Project"
+          ${{ steps.cgroup.outputs.exec }} cmake --build -j 6 --preset ${{ matrix.preset }}-debug
+          echo "::endgroup::"
+
+      - name: CMake Build (Release)
+        if: github.event.pull_request.merged == true
+        env:
+          VCPKG_BINARY_SOURCES: clear
+        run: |
+          echo "::group::Configure Project"
+          ${{ steps.cgroup.outputs.exec }} cmake --preset ${{ matrix.preset }}-release \
+            -DBUILD_TESTS=ON -DBUILD_TCK=ON -DBUILD_TCK_TESTS=ON -DBUILD_EXAMPLES=ON
+          echo "::endgroup::"
+
+          echo "::group::Build Project"
+          ${{ steps.cgroup.outputs.exec }} cmake --build -j 6 --preset ${{ matrix.preset }}-release
+          echo "::endgroup::"
+
+      - name: Prepare Hiero Solo
+        id: solo
+        uses: hiero-ledger/hiero-solo-action@328bc84c3b00a990a151418144fd682a4eb76ea6 # v0.19.0
+        with:
+          soloVersion: v0.65.1
+          installMirrorNode: true
+          mirrorNodeVersion: v0.153.0
+          hieroVersion: v0.73.0
+          dualMode: true
+
+      - name: Start CTest suite (Debug)
+        run: ${{ steps.cgroup.outputs.exec }} ctest -j 6 -C Debug --test-dir build/${{ matrix.preset }}-debug -E NodeUpdateTransactionIntegrationTests --output-on-failure
+
+      - name: Start CTest suite (Release)
+        if: github.event.pull_request.merged == true
+        run: ${{ steps.cgroup.outputs.exec }} ctest -j 6 -C Debug --test-dir build/${{ matrix.preset }}-release -E NodeUpdateTransactionIntegrationTests --output-on-failure
+
+      - name: Run Node Update Integration Tests (Debug)
+        run: ${{ steps.cgroup.outputs.exec }} ctest -C Debug --test-dir build/${{ matrix.preset }}-debug -R NodeUpdateTransactionIntegrationTests --output-on-failure
+
+      - name: Run Node Update Integration Tests (Release)
+        if: github.event.pull_request.merged == true
+        run: ${{ steps.cgroup.outputs.exec }} ctest -C Debug --test-dir build/${{ matrix.preset }}-release -R NodeUpdateTransactionIntegrationTests --output-on-failure
+
+      - name: Compute Short SHA
+        id: sha
+        run: echo "short=$(echo -n "${{ github.sha }}" | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Attach Artifact
+        if: github.event.pull_request.merged == true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hapi-library-${{ runner.os }}-${{ steps.sha.outputs.short }}
+          path: package/
+          if-no-files-found: warn
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-latest
+    if: ${{ (inputs.run-windows-builds) && !cancelled() }}
+
+    env:
+      HEDERA_NETWORK: localhost
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99 # v2.19.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Setup-msbuild
+        uses: step-security/setup-msbuild@f01243490939309baa8e659042bec579fa10db95 # v2.0.1
+        with:
+          msbuild-architecture: x64
+
+      - name: Setup-perl
+        uses: shogo82148/actions-setup-perl@a198315ec4e9244f206879ea7b63078003aec8a6 # v1.41.1
+        with:
+          perl-version: "5.32"
+          distribution: strawberry
+
+      - name: Setup-nasm
+        uses: ilammy/setup-nasm@72793074d3c8cdda771dba85f6deafe00623038b # v1.5.2
+
+      - name: Enable Git long paths
+        run: git config --global core.longpaths true
+
+      - name: Build (Debug)
+        run: |
+          git submodule update --init
+          cmake --preset windows-x64-debug
+          cmake --build --preset windows-x64-debug -j 4
+
+      - name: Build (Release)
+        run: |
+          cmake --preset windows-x64-release
+          cmake --build --preset windows-x64-release -j 4
+
+      - name: Compute Short SHA
+        id: sha
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}"
+          $short = $sha.Substring(0, 8)
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "short=$short"
+
+      - name: Attach Artifact 
+        if: ${{ inputs.upload-artifacts }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hapi-library-${{ runner.os }}-${{ steps.sha.outputs.short }}
+          path: package/
+          if-no-files-found: warn
+
+  build-macos:
+    name: Build (MacOS)
+    runs-on: macos-latest
+    if: ${{ (inputs.run-macos-builds) && !cancelled() }}
+    env:
+      HEDERA_NETWORK: localhost
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@9ca718d3bf646d6534007c269a635b3e54cadf99 # v2.19.2
+        with:
+          egress-policy: audit
+
+      - name: Checkout Code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@3b1f8f94a2f8254bd26914c4ab9474d4f0015f67 # v5.0.0
+
+      - name: Build (Debug)
+        run: |
+          git submodule update --init
+          cmake --preset macos-arm64-debug
+          cmake --build --preset macos-arm64-debug -j 4
+
+      - name: Build (Release)
+        run: |
+          cmake --preset macos-arm64-release
+          cmake --build --preset macos-arm64-release -j 4
+
+      - name: Compute Short SHA
+        id: sha
+        run: echo "short=$(echo -n "${{ github.sha }}" | cut -c1-8)" >> $GITHUB_OUTPUT
+
+      - name: Attach Artifact 
+        if: ${{ inputs.upload-artifacts }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hapi-library-${{ runner.os }}-${{ steps.sha.outputs.short }}
+          path: package/
+          if-no-files-found: warn

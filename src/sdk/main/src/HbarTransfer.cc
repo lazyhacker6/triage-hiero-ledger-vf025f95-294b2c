@@ -1,0 +1,116 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "HbarTransfer.h"
+#include "hooks/FungibleHookType.h"
+#include "impl/Utilities.h"
+
+#include <nlohmann/json.hpp>
+
+#include <services/basic_types.pb.h>
+
+namespace Hiero
+{
+//-----
+HbarTransfer::HbarTransfer(AccountId accountId, const Hbar& amount, bool approval)
+  : mAccountId(std::move(accountId))
+  , mAmount(amount)
+  , mIsApproved(approval)
+{
+}
+
+//-----
+HbarTransfer::HbarTransfer(AccountId accountId, const Hbar& amount, bool approval, const FungibleHookCall& hookCall)
+  : mAccountId(std::move(accountId))
+  , mAmount(amount)
+  , mIsApproved(approval)
+  , mHookCall(hookCall)
+{
+}
+
+//-----
+HbarTransfer HbarTransfer::fromProtobuf(const proto::AccountAmount& proto)
+{
+  HbarTransfer transfer;
+
+  if (proto.has_accountid())
+  {
+    transfer.mAccountId = AccountId::fromProtobuf(proto.accountid());
+  }
+
+  transfer.mAmount = Hbar(proto.amount(), HbarUnit::TINYBAR());
+  transfer.mIsApproved = proto.is_approval();
+
+  if (proto.has_pre_tx_allowance_hook())
+  {
+    transfer.mHookCall =
+      FungibleHookCall::fromProtobuf(proto.pre_tx_allowance_hook(), FungibleHookType::PRE_TX_ALLOWANCE_HOOK);
+  }
+
+  if (proto.has_pre_post_tx_allowance_hook())
+  {
+    transfer.mHookCall =
+      FungibleHookCall::fromProtobuf(proto.pre_post_tx_allowance_hook(), FungibleHookType::PRE_POST_TX_ALLOWANCE_HOOK);
+  }
+
+  return transfer;
+}
+
+//-----
+HbarTransfer HbarTransfer::fromBytes(const std::vector<std::byte>& bytes)
+{
+  proto::AccountAmount proto;
+  proto.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()));
+  return fromProtobuf(proto);
+}
+
+//-----
+std::unique_ptr<proto::AccountAmount> HbarTransfer::toProtobuf() const
+{
+  auto proto = std::make_unique<proto::AccountAmount>();
+  proto->set_allocated_accountid(mAccountId.toProtobuf().release());
+  proto->set_amount(mAmount.toTinybars());
+  proto->set_is_approval(mIsApproved);
+
+  if (mHookCall.getHookType() == FungibleHookType::PRE_TX_ALLOWANCE_HOOK)
+  {
+    proto->set_allocated_pre_tx_allowance_hook(mHookCall.toProtobuf().release());
+  }
+
+  else if (mHookCall.getHookType() == FungibleHookType::PRE_POST_TX_ALLOWANCE_HOOK)
+  {
+    proto->set_allocated_pre_post_tx_allowance_hook(mHookCall.toProtobuf().release());
+  }
+
+  return proto;
+}
+
+//-----
+std::vector<std::byte> HbarTransfer::toBytes() const
+{
+  return internal::Utilities::stringToByteVector(toProtobuf()->SerializeAsString());
+}
+
+//-----
+std::string HbarTransfer::toString() const
+{
+  nlohmann::json json;
+  json["mAccountId"] = mAccountId.toString();
+  json["mAmount"] = mAmount.toString();
+  json["mIsApproved"] = mIsApproved;
+  json["mHookType"] = gFungibleHookTypeToString.at(mHookCall.getHookType());
+  return json.dump();
+}
+
+//-----
+std::ostream& operator<<(std::ostream& os, const HbarTransfer& transfer)
+{
+  os << transfer.toString();
+  return os;
+}
+
+//-----
+bool HbarTransfer::operator==(const HbarTransfer& other) const
+{
+  return (mAccountId == other.mAccountId) && (mAmount == other.mAmount) && (mIsApproved == other.mIsApproved);
+}
+
+} // namespace Hiero
